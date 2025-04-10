@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MP3 Transcription App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #cccccc;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px;
+            display: none;
+        }
+        .success {
+            background-color: #dff0d8;
+            border: 1px solid #d6e9c6;
+            color: #3c763d;
+        }
+        .error {
+            background-color: #f2dede;
+            border: 1px solid #ebccd1;
+            color: #a94442;
+        }
+    </style>
+</head>
+<body>
+    <h1>MP3 Transcription App</h1>
+    <div class="container">
+        <div class="form-group">
+            <label for="api-key">OpenAI API Key:</label>
+            <input type="password" id="api-key" style="width: 100%; padding: 8px;">
+        </div>
+        <div class="form-group">
+            <label for="file-upload">Select MP3 File:</label>
+            <input type="file" id="file-upload" accept=".mp3,.m4a">
+        </div>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="split-audio"> Split large files (recommended for files over 25MB)
+            </label>
+        </div>
+        <button id="upload-btn">Transcribe Audio</button>
+        <div id="status"></div>
+        <div id="download-container" style="margin-top: 20px; display: none;">
+            <a id="download-link" href="#" download="transcription.txt">
+                <button>Download Transcription</button>
+            </a>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const apiKeyInput = document.getElementById('api-key');
+            const fileUpload = document.getElementById('file-upload');
+            const splitAudioCheckbox = document.getElementById('split-audio');
+            const uploadBtn = document.getElementById('upload-btn');
+            const statusDiv = document.getElementById('status');
+            const downloadContainer = document.getElementById('download-container');
+            const downloadLink = document.getElementById('download-link');
+
+            // Add file size check to show/hide split option
+            fileUpload.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file && file.size > 25 * 1024 * 1024) { // 25MB
+                    splitAudioCheckbox.parentElement.style.display = 'block';
+                } else {
+                    splitAudioCheckbox.parentElement.style.display = 'none';
+                    splitAudioCheckbox.checked = false;
+                }
+            });
+
+            uploadBtn.addEventListener('click', async () => {
+                const apiKey = apiKeyInput.value.trim();
+                const file = fileUpload.files[0];
+                const shouldSplit = splitAudioCheckbox.checked;
+
+                // Validation
+                if (!apiKey) {
+                    showStatus('Please enter your OpenAI API key.', 'error');
+                    return;
+                }
+
+                if (!file) {
+                    showStatus('Please select an audio file.', 'error');
+                    return;
+                }
+
+                if (!(file.type === 'audio/mpeg' || 
+                      file.type === 'audio/mp4' ||
+                      file.name.endsWith('.mp3') ||
+                      file.name.endsWith('.m4a'))) {
+                    showStatus('Please select a valid MP3 or M4A file.', 'error');
+                    return;
+                }
+
+                // Prepare for upload
+                uploadBtn.disabled = true;
+                showStatus('Uploading and transcribing...', 'success');
+
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('apiKey', apiKey);
+                formData.append('shouldSplit', shouldSplit);
+
+                try {
+                    const response = await fetch('/transcribe', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const data = await response.json();
+
+                    if (!response.ok) {
+                        throw new Error(data.error || 'Failed to transcribe audio');
+                    }
+
+                    showStatus('Transcription completed!', 'success');
+
+                    // Create download link
+                    const blob = new Blob([data.text], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    downloadLink.href = url;
+                    downloadLink.download = file.name.replace(/\.(mp3|m4a)$/, '.txt');
+                    downloadContainer.style.display = 'block';
+                } catch (error) {
+                    showStatus(error.message, 'error');
+                } finally {
+                    uploadBtn.disabled = false;
+                }
+            });
+
+            function showStatus(message, type) {
+                statusDiv.textContent = message;
+                statusDiv.className = type;
+                statusDiv.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
