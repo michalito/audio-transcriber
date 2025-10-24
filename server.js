@@ -123,24 +123,65 @@ async function splitAudio(inputPath, parts) {
     }
 }
 
-async function transcribeFile(filePath, apiKey) {
-    const formData = new FormData();
-    formData.append('file', fs.createReadStream(filePath));
-    formData.append('model', 'whisper-1');
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-    const response = await axios.post(
-        'https://api.openai.com/v1/audio/transcriptions',
-        formData,
-        {
-            headers: {
-                ...formData.getHeaders(),
-                'Authorization': `Bearer ${apiKey}`,
-            },
-            maxBodyLength: Infinity,
+async function transcribeFile(filePath, apiKey, retries = 4) {
+    let lastError;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const formData = new FormData();
+            formData.append('file', fs.createReadStream(filePath));
+            formData.append('model', 'whisper-1');
+
+            console.log(`Transcribing ${path.basename(filePath)} (attempt ${attempt + 1}/${retries + 1})...`);
+
+            const response = await axios.post(
+                'https://api.openai.com/v1/audio/transcriptions',
+                formData,
+                {
+                    headers: {
+                        ...formData.getHeaders(),
+                        'Authorization': `Bearer ${apiKey}`,
+                    },
+                    maxBodyLength: Infinity,
+                    timeout: 300000, // 5 minutes timeout for large file uploads
+                    validateStatus: function (status) {
+                        return status < 500; // Don't throw on 4xx errors
+                    }
+                }
+            );
+
+            if (response.status >= 400) {
+                throw new Error(`API error: ${response.status} - ${JSON.stringify(response.data)}`);
+            }
+
+            console.log(`Successfully transcribed ${path.basename(filePath)}`);
+            return response.data.text;
+
+        } catch (error) {
+            lastError = error;
+            const isRetryable =
+                error.code === 'ECONNRESET' ||
+                error.code === 'ETIMEDOUT' ||
+                error.code === 'ECONNREFUSED' ||
+                error.message.includes('timeout') ||
+                error.message.includes('Connection error');
+
+            if (!isRetryable || attempt === retries) {
+                console.error(`Failed to transcribe ${path.basename(filePath)}:`, error.message);
+                throw error;
+            }
+
+            const backoffTime = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s, 8s
+            console.log(`Connection error on attempt ${attempt + 1}, retrying in ${backoffTime/1000}s...`);
+            await sleep(backoffTime);
         }
-    );
+    }
 
-    return response.data.text;
+    throw lastError;
 }
 
 // Transcribe endpoint
@@ -169,11 +210,19 @@ app.post('/transcribe', upload.single('file'), async (req, res) => {
                     
                     const splitPaths = await splitAudio(filePath, parts);
                     console.log('Split paths:', splitPaths);
-                    
-                    // Transcribe each part
-                    const transcriptions = await Promise.all(
-                        splitPaths.map(path => transcribeFile(path, apiKey))
-                    );
+
+                    // Transcribe each part sequentially to avoid overwhelming the connection
+                    const transcriptions = [];
+                    for (let i = 0; i < splitPaths.length; i++) {
+                        console.log(`Processing chunk ${i + 1}/${splitPaths.length}...`);
+                        try {
+                            const text = await transcribeFile(splitPaths[i], apiKey);
+                            transcriptions.push(text);
+                        } catch (error) {
+                            console.error(`Failed to transcribe chunk ${i + 1}/${splitPaths.length}:`, error.message);
+                            throw new Error(`Failed to transcribe chunk ${i + 1}/${splitPaths.length}: ${error.message}`);
+                        }
+                    }
 
                     // Combine transcriptions
                     transcription = transcriptions.join(' ');
@@ -209,6 +258,7 @@ app.post('/transcribe', upload.single('file'), async (req, res) => {
         if (!transcription) {
             // If we haven't already transcribed split files
             try {
+                console.log('Starting transcription for single file...');
                 const response = await transcribeFile(filePath, apiKey);
                 transcription = response;
             } catch (apiError) {
@@ -216,6 +266,10 @@ app.post('/transcribe', upload.single('file'), async (req, res) => {
                     return res.status(401).json({ error: 'Invalid OpenAI API key' });
                 } else if (apiError.response?.status === 429) {
                     return res.status(429).json({ error: 'Rate limit exceeded. Please try again later.' });
+                } else if (apiError.code === 'ECONNRESET' || apiError.message.includes('Connection error')) {
+                    return res.status(503).json({
+                        error: 'Connection error while uploading to OpenAI. The file may be too large or your network connection is unstable. Try splitting the file or checking your internet connection.'
+                    });
                 }
                 throw apiError;
             }
